@@ -3,6 +3,7 @@
 import asyncio
 import os
 import json
+import re
 from typing import Optional
 from dotenv import load_dotenv
 from claude_agent_sdk import query as claude_query, ClaudeAgentOptions
@@ -30,6 +31,59 @@ def get_api_key() -> str:
             "Please set it in your .env file or environment."
         )
     return api_key
+
+
+def is_japanese(text: str) -> bool:
+    """
+    Check if the text contains Japanese characters.
+
+    Args:
+        text: Text to check
+
+    Returns:
+        True if text contains Japanese characters, False otherwise
+    """
+    # Check for Hiragana, Katakana, or Kanji
+    japanese_pattern = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
+    return bool(japanese_pattern.search(text))
+
+
+async def translate_to_english(text: str) -> str:
+    """
+    Translate Japanese text to English using Claude.
+
+    Args:
+        text: Japanese text to translate
+
+    Returns:
+        English translation
+    """
+    try:
+        get_api_key()
+    except ValueError:
+        # If no API key, return original text
+        return text
+
+    prompt = f"""Translate the following Japanese text to English.
+Only output the English translation, nothing else.
+
+Japanese text: {text}
+
+English translation:"""
+
+    options = ClaudeAgentOptions()
+    translation = ""
+
+    from claude_agent_sdk.types import AssistantMessage, TextBlock
+
+    async for event in claude_query(prompt=prompt, options=options):
+        if isinstance(event, AssistantMessage):
+            if hasattr(event, 'content'):
+                for block in event.content:
+                    if isinstance(block, TextBlock):
+                        translation += block.text
+
+    return translation.strip()
 
 
 def get_system_prompt() -> str:
@@ -85,17 +139,28 @@ async def research_query_sources(user_query: str, sources: Optional[list[str]] =
     tools = ResearchTools()
     results = {}
 
+    # Detect if query is in Japanese and translate if needed
+    english_query = user_query
+    if is_japanese(user_query):
+        print("🌐 日本語クエリを検出しました。英語に翻訳中...")
+        english_query = await translate_to_english(user_query)
+        print(f"   翻訳結果: {english_query}")
+
     try:
         # Execute searches in parallel for efficiency
         tasks = []
         if "reddit" in sources:
+            # Reddit supports multiple languages, use original query
             tasks.append(("reddit", tools.search_reddit(user_query)))
         if "arxiv" in sources:
-            tasks.append(("arxiv", tools.search_arxiv(user_query)))
+            # ArXiv requires English query
+            tasks.append(("arxiv", tools.search_arxiv(english_query)))
         if "youtube" in sources:
-            tasks.append(("youtube", tools.search_youtube(user_query)))
+            # YouTube works better with English
+            tasks.append(("youtube", tools.search_youtube(english_query)))
         if "medium" in sources:
-            tasks.append(("medium", tools.search_medium(user_query)))
+            # Medium works better with English
+            tasks.append(("medium", tools.search_medium(english_query)))
 
         # Wait for all searches to complete
         for source_name, task in tasks:
